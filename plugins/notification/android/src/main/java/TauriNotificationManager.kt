@@ -337,7 +337,7 @@ class TauriNotificationManager(
           val interval: Long = schedule.date.time - Date().time
           alarmManager.setRepeating(AlarmManager.RTC, schedule.date.time, interval, pendingIntent)
         } else {
-          setExactIfPossible(alarmManager, schedule, schedule.date.time, pendingIntent)
+          setAlarm(alarmManager, schedule.date.time, schedule.allowWhileIdle(), pendingIntent)
         }
       }
       is NotificationSchedule.Interval -> {
@@ -345,7 +345,7 @@ class TauriNotificationManager(
         notificationIntent.putExtra(TimedNotificationPublisher.CRON_KEY, schedule.interval.toMatchString())
         pendingIntent =
           PendingIntent.getBroadcast(context, request.id, notificationIntent, flags)
-        setExactIfPossible(alarmManager, schedule, trigger, pendingIntent)
+        setAlarm(alarmManager, trigger, schedule.allowWhileIdle(), pendingIntent)
         val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
         Logger.debug(
           Logger.tags("Notification"),
@@ -358,28 +358,6 @@ class TauriNotificationManager(
         alarmManager.setRepeating(AlarmManager.RTC, startTime, everyInterval, pendingIntent)
       }
       else -> {}
-    }
-  }
-
-  @SuppressLint("ObsoleteSdkInt", "MissingPermission")
-  private fun setExactIfPossible(
-    alarmManager: AlarmManager,
-    schedule: NotificationSchedule,
-    trigger: Long,
-    pendingIntent: PendingIntent
-  ) {
-    if (SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
-      if (SDK_INT >= Build.VERSION_CODES.M && schedule.allowWhileIdle()) {
-        alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
-      } else {
-        alarmManager[AlarmManager.RTC, trigger] = pendingIntent
-      }
-    } else {
-      if (SDK_INT >= Build.VERSION_CODES.M && schedule.allowWhileIdle()) {
-        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
-      } else {
-        alarmManager.setExact(AlarmManager.RTC, trigger, pendingIntent)
-      }
     }
   }
 
@@ -494,7 +472,11 @@ class TimedNotificationPublisher : BroadcastReceiver() {
     }
 
     notificationManager.notify(id, notification)
-    if (!rescheduleNotificationIfNeeded(context, intent, id)) {
+    // What the schedule asked for, read where it was saved. The receiver has no schedule
+    // of its own: it is handed an intent, and the intent carries the cron string and not
+    // the flag, which is how the two decisions came apart in the first place.
+    val allowWhileIdle = savedNotification?.schedule?.allowWhileIdle() ?: false
+    if (!rescheduleNotificationIfNeeded(context, intent, id, allowWhileIdle)) {
       storage.deleteNotification(id.toString())
     }
   }
@@ -505,7 +487,12 @@ class TimedNotificationPublisher : BroadcastReceiver() {
   }
 
   @SuppressLint("MissingPermission", "SimpleDateFormat")
-  private fun rescheduleNotificationIfNeeded(context: Context, intent: Intent, id: Int): Boolean {
+  private fun rescheduleNotificationIfNeeded(
+    context: Context,
+    intent: Intent,
+    id: Int,
+    allowWhileIdle: Boolean
+  ): Boolean {
     val dateString = intent.getStringExtra(CRON_KEY)
     if (dateString != null) {
       val date = DateMatch.fromMatchString(dateString)
@@ -517,11 +504,7 @@ class TimedNotificationPublisher : BroadcastReceiver() {
         flags = flags or PendingIntent.FLAG_MUTABLE
       }
       val pendingIntent = PendingIntent.getBroadcast(context, id, clone, flags)
-      if (SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
-        alarmManager[AlarmManager.RTC, trigger] = pendingIntent
-      } else {
-        alarmManager.setExact(AlarmManager.RTC, trigger, pendingIntent)
-      }
+      setAlarm(alarmManager, trigger, allowWhileIdle, pendingIntent)
       val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
       Logger.debug(
         Logger.tags("Notification"),
@@ -577,5 +560,37 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
     }
     val notificationManager = TauriNotificationManager(storage, null, context, config)
     notificationManager.schedule(notifications)
+  }
+}
+
+/**
+ * Put one alarm on the queue, as exactly and as insistently as this device allows.
+ *
+ * Shared by the first firing and by every re-arming after it. They used to decide this
+ * separately and had already drifted apart: a scheduled notification would wake a dozing
+ * phone on the day it was created and then, from the second day on, wait for the phone to
+ * be picked up, because the receiver re-armed with RTC and no idle allowance. Nothing in
+ * the schedule said to stop allowing it; the second copy of the decision simply never
+ * read it.
+ *
+ * `allowWhileIdle` is what the caller asked for, and it only ever relaxes Doze for this
+ * one alarm. Exactness is not asked for: it is whatever the device will give, so an app
+ * without SCHEDULE_EXACT_ALARM still gets its notification, just moved.
+ */
+@SuppressLint("ObsoleteSdkInt", "MissingPermission")
+internal fun setAlarm(
+  alarmManager: AlarmManager,
+  trigger: Long,
+  allowWhileIdle: Boolean,
+  pendingIntent: PendingIntent
+) {
+  val exact = SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()
+  val whileIdle = SDK_INT >= Build.VERSION_CODES.M && allowWhileIdle
+  when {
+    exact && whileIdle ->
+      alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
+    exact -> alarmManager.setExact(AlarmManager.RTC, trigger, pendingIntent)
+    whileIdle -> alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
+    else -> alarmManager[AlarmManager.RTC, trigger] = pendingIntent
   }
 }
