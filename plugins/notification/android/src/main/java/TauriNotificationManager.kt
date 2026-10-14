@@ -343,6 +343,10 @@ class TauriNotificationManager(
       is NotificationSchedule.Interval -> {
         val trigger = schedule.interval.nextTrigger(Date())
         notificationIntent.putExtra(TimedNotificationPublisher.CRON_KEY, schedule.interval.toMatchString())
+        notificationIntent.putExtra(
+          TimedNotificationPublisher.ALLOW_WHILE_IDLE_KEY,
+          schedule.allowWhileIdle()
+        )
         pendingIntent =
           PendingIntent.getBroadcast(context, request.id, notificationIntent, flags)
         setAlarm(alarmManager, trigger, schedule.allowWhileIdle(), pendingIntent)
@@ -472,10 +476,16 @@ class TimedNotificationPublisher : BroadcastReceiver() {
     }
 
     notificationManager.notify(id, notification)
-    // What the schedule asked for, read where it was saved. The receiver has no schedule
-    // of its own: it is handed an intent, and the intent carries the cron string and not
-    // the flag, which is how the two decisions came apart in the first place.
-    val allowWhileIdle = savedNotification?.schedule?.allowWhileIdle() ?: false
+    // What the schedule asked for, carried on the intent beside the cron string, which is
+    // how the receiver already learns everything else it knows. The storage is not an
+    // option: a notification scheduled through `show` is never written there, only one
+    // scheduled through `batch`, and nothing in the Rust API reaches `batch`. So
+    // `getSavedNotification` returns null for every notification this plugin schedules
+    // and a flag read from it is always false.
+    //
+    // The intent is cloned on each re-arming, so the answer travels with the alarm for as
+    // long as the alarm exists, without persisting anything new.
+    val allowWhileIdle = intent.getBooleanExtra(ALLOW_WHILE_IDLE_KEY, false)
     if (!rescheduleNotificationIfNeeded(context, intent, id, allowWhileIdle)) {
       storage.deleteNotification(id.toString())
     }
@@ -518,6 +528,7 @@ class TimedNotificationPublisher : BroadcastReceiver() {
   companion object {
     var NOTIFICATION_KEY = "NotificationPublisher.notification"
     var CRON_KEY = "NotificationPublisher.cron"
+    var ALLOW_WHILE_IDLE_KEY = "NotificationPublisher.allowWhileIdle"
   }
 }
 
