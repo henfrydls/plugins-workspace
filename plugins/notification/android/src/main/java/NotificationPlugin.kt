@@ -131,10 +131,21 @@ class NotificationPlugin(private val activity: Activity): Plugin(activity) {
     }
   }
 
+  // Both commands keep what they scheduled, as the JSON it arrived in, because that store is
+  // all the restore receiver has after a restart or an update: the alarm itself is gone by
+  // then and nothing else remembers the hour. `show` used to keep nothing, and it is the
+  // only command the Rust API reaches, so the receiver always found the store empty and a
+  // restart took every scheduled notification with it until the app was opened again.
+  //
+  // The arriving JSON rather than one written back from the parsed object: the schedule's
+  // own serializer leaves out allowWhileIdle, so a round trip through it would restore an
+  // alarm that no longer wakes the phone.
   @Command
   fun show(invoke: Invoke) {
     val notification = invoke.parseArgs(Notification::class.java)
+    notification.sourceJson = invoke.getRawArgs()
     val id = manager.schedule(notification)
+    notificationStorage.appendNotifications(listOf(notification))
 
     invoke.resolveObject(id)
   }
@@ -142,6 +153,10 @@ class NotificationPlugin(private val activity: Activity): Plugin(activity) {
   @Command
   fun batch(invoke: Invoke) {
     val args = invoke.parseArgs(BatchArgs::class.java)
+    val sources = NotificationStorage.sourcesOfBatch(jsonMapper(), invoke.getRawArgs())
+    args.notifications.forEachIndexed { i, notification ->
+      notification.sourceJson = sources.getOrNull(i)
+    }
 
     val ids = manager.schedule(args.notifications)
     notificationStorage.appendNotifications(args.notifications)

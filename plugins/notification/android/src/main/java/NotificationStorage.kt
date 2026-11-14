@@ -6,8 +6,11 @@ package app.tauri.notification
 
 import android.content.Context
 import android.content.SharedPreferences
+import app.tauri.Logger
+import com.fasterxml.jackson.annotation.JsonAutoDetect
+import com.fasterxml.jackson.annotation.PropertyAccessor
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.json.JSONException
 import java.lang.Exception
 
 // Key for private preferences
@@ -16,13 +19,26 @@ private const val NOTIFICATION_STORE_ID = "NOTIFICATION_STORE"
 private const val ACTION_TYPES_ID = "ACTION_TYPE_STORE"
 
 class NotificationStorage(private val context: Context, private val jsonMapper: ObjectMapper) {
+  /**
+   * Keep each scheduled notification as the JSON it arrived in, under its id.
+   *
+   * It used to write `sourceJson.toString()` with nothing ever assigning `sourceJson`, so
+   * what it would have kept was the string "null". A notification without its source is
+   * skipped rather than stored as that.
+   *
+   * One without a schedule takes its id out instead: scheduling it has just cancelled the
+   * alarm that id had, and an entry left behind would be put back on the next restart.
+   */
   fun appendNotifications(localNotifications: List<Notification>) {
     val storage = getStorage(NOTIFICATION_STORE_ID)
     val editor = storage.edit()
     for (request in localNotifications) {
-      if (request.schedule != null) {
-        val key: String = request.id.toString()
-        editor.putString(key, request.sourceJson.toString())
+      val key: String = request.id.toString()
+      val source = request.sourceJson
+      if (request.schedule == null) {
+        editor.remove(key)
+      } else if (source != null) {
+        editor.putString(key, source)
       }
     }
     editor.apply()
@@ -42,11 +58,12 @@ class NotificationStorage(private val context: Context, private val jsonMapper: 
     if (all != null) {
       val notifications = ArrayList<Notification>()
       for (key in all.keys) {
-        val notificationString = all[key] as String?
+        val notificationString = all[key] as String? ?: continue
         try {
-          val notification = jsonMapper.readValue(notificationString, Notification::class.java)
-          notifications.add(notification)
-        } catch (_: Exception) { }
+          decode(jsonMapper, notificationString)?.let { notifications.add(it) }
+        } catch (ex: Exception) {
+          Logger.error(Logger.tags("Notification"), "Stored notification $key cannot be read", ex)
+        }
       }
       return notifications
     }
@@ -61,9 +78,12 @@ class NotificationStorage(private val context: Context, private val jsonMapper: 
       return null
     } ?: return null
 
+    // Any exception, not only org.json's: Jackson throws its own, and this runs inside
+    // broadcast receivers, where one escaping takes the delivery of the notification with it.
     return try {
-      jsonMapper.readValue(notificationString, Notification::class.java)
-    } catch (ex: JSONException) {
+      decode(jsonMapper, notificationString)
+    } catch (ex: Exception) {
+      Logger.error(Logger.tags("Notification"), "Stored notification $key cannot be read", ex)
       null
     }
   }
@@ -109,5 +129,41 @@ class NotificationStorage(private val context: Context, private val jsonMapper: 
       actions[i] = action
     }
     return actions
+  }
+
+  companion object {
+    /**
+     * A mapper configured like the one Tauri hands the plugin, for the receivers, which run
+     * without the plugin and so without its mapper.
+     *
+     * They used to build a bare `ObjectMapper()`, which was harmless while the store was
+     * always empty and would not be now: what `show` stores is the JSON the Rust side sent,
+     * and that carries fields this class does not have, such as `silent`. A bare mapper fails
+     * on the first one, so every stored notification would read as unreadable, and in
+     * TimedNotificationPublisher the exception would end the delivery before the
+     * notification was shown. These are the three settings of tauri's PluginManager, so a
+     * stored notification is read back exactly as `show` parsed it.
+     */
+    fun receiverJsonMapper(): ObjectMapper = ObjectMapper()
+      .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+      .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+      .setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY)
+
+    /**
+     * A stored notification, read back with its source kept, so that storing it again, as
+     * the restore receiver does, writes the same JSON instead of nothing. Null for a stored
+     * JSON null.
+     */
+    fun decode(jsonMapper: ObjectMapper, json: String): Notification? {
+      val notification = jsonMapper.readValue(json, Notification::class.java) ?: return null
+      notification.sourceJson = json
+      return notification
+    }
+
+    /** The JSON of each notification in a `batch` call, in the order they arrived. */
+    fun sourcesOfBatch(jsonMapper: ObjectMapper, rawArgs: String): List<String> {
+      val notifications = jsonMapper.readTree(rawArgs)?.get("notifications") ?: return listOf()
+      return notifications.map { it.toString() }
+    }
   }
 }

@@ -39,6 +39,9 @@ dependencies {
     implementation("com.google.android.material:material:1.7.0")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
     testImplementation("junit:junit:4.13.2")
+    // Local unit tests run against a stub android.jar whose org.json throws; Notification
+    // carries a JSObject, which is an org.json JSONObject, so the tests need the real one.
+    testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     implementation(project(":tauri-android"))

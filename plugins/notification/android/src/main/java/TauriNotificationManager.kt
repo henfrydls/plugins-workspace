@@ -26,7 +26,6 @@ import androidx.core.app.RemoteInput
 import app.tauri.Logger
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.PluginManager
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.json.JSONException
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -442,7 +441,7 @@ class NotificationDismissReceiver : BroadcastReceiver() {
     val isRemovable =
       intent.getBooleanExtra(NOTIFICATION_IS_REMOVABLE_KEY, true)
     if (isRemovable) {
-      val notificationStorage = NotificationStorage(context, ObjectMapper())
+      val notificationStorage = NotificationStorage(context, NotificationStorage.receiverJsonMapper())
       notificationStorage.deleteNotification(intExtra.toString())
     }
   }
@@ -468,7 +467,7 @@ class TimedNotificationPublisher : BroadcastReceiver() {
     if (id == Int.MIN_VALUE) {
       Logger.error(Logger.tags("Notification"), "No valid id supplied", null)
     }
-    val storage = NotificationStorage(context, ObjectMapper())
+    val storage = NotificationStorage(context, NotificationStorage.receiverJsonMapper())
 
     val savedNotification = storage.getSavedNotification(id.toString())
     if (savedNotification != null) {
@@ -477,15 +476,16 @@ class TimedNotificationPublisher : BroadcastReceiver() {
 
     notificationManager.notify(id, notification)
     // What the schedule asked for, carried on the intent beside the cron string, which is
-    // how the receiver already learns everything else it knows. The storage is not an
-    // option: a notification scheduled through `show` is never written there, only one
-    // scheduled through `batch`, and nothing in the Rust API reaches `batch`. So
-    // `getSavedNotification` returns null for every notification this plugin schedules
-    // and a flag read from it is always false.
+    // how the receiver already learns everything else it knows. The intent is cloned on
+    // each re-arming, so the answer travels with the alarm for as long as the alarm exists.
     //
-    // The intent is cloned on each re-arming, so the answer travels with the alarm for as
-    // long as the alarm exists, without persisting anything new.
+    // It was put there when the storage was always empty, and it stays there now that
+    // `show` writes the storage: an alarm armed by a build from before that change has an
+    // intent with the flag and no stored notification at all.
     val allowWhileIdle = intent.getBooleanExtra(ALLOW_WHILE_IDLE_KEY, false)
+    // A repeating notification is re-armed and stays stored, which is what lets the restore
+    // receiver put it back after a restart or an update. Only a one-off is forgotten here,
+    // once it has been shown.
     if (!rescheduleNotificationIfNeeded(context, intent, id, allowWhileIdle)) {
       storage.deleteNotification(id.toString())
     }
@@ -532,19 +532,39 @@ class TimedNotificationPublisher : BroadcastReceiver() {
   }
 }
 
+/**
+ * Put every stored notification back on the alarm queue.
+ *
+ * After a restart, because Android empties the queue when it shuts down. After an update
+ * of the app too (MY_PACKAGE_REPLACED), because an update can take the alarms with it: an
+ * app whose new version no longer declares SCHEDULE_EXACT_ALARM has its exact alarms
+ * removed by AlarmManagerService on install, without the app being run or told. Either
+ * way, without this a repeating notification stays gone until somebody opens the app.
+ *
+ * Re-arming one that is still on the queue does not double it. `schedule` cancels the
+ * timer for that id and arms the new one under the same id with FLAG_CANCEL_CURRENT, so
+ * an update that kept the alarm, or a second boot broadcast, ends with one alarm.
+ *
+ * A repeating schedule is armed for its next match from now, so nothing fires at once.
+ * Only a one-off whose time passed while the phone was off is shown, fifteen seconds
+ * later, which is what the original restore was written to do.
+ */
 class LocalNotificationRestoreReceiver : BroadcastReceiver() {
   @SuppressLint("ObsoleteSdkInt")
   override fun onReceive(context: Context, intent: Intent) {
+    // The receiver is direct boot aware, so LOCKED_BOOT_COMPLETED reaches it before the
+    // user has unlocked, when the store, which lives in credential protected storage,
+    // cannot be read. It leaves; BOOT_COMPLETED follows the unlock and does the work. An
+    // update is only ever installed for a running user, so MY_PACKAGE_REPLACED passes.
     if (SDK_INT >= Build.VERSION_CODES.N) {
       val um = context.getSystemService(
         UserManager::class.java
       )
       if (um == null || !um.isUserUnlocked) return
     }
-    val storage = NotificationStorage(context, ObjectMapper())
+    val storage = NotificationStorage(context, NotificationStorage.receiverJsonMapper())
     val ids = storage.getSavedNotificationIds()
     val notifications = mutableListOf<Notification>()
-    val updatedNotifications = mutableListOf<Notification>()
     for (id in ids) {
       val notification = storage.getSavedNotification(id) ?: continue
       val schedule = notification.schedule
@@ -554,14 +574,14 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
           // modify the scheduled date in order to show notifications that would have been delivered while device was off.
           val newDateTime = Date().time + 15 * 1000
           schedule.date = Date(newDateTime)
-          updatedNotifications.add(notification)
         }
       }
       notifications.add(notification)
     }
-    if (updatedNotifications.size > 0) {
-      storage.appendNotifications(updatedNotifications)
-    }
+    // The moved date is not stored back. That write used to store the string "null" over
+    // the notification, and storing the source JSON again would keep the old date anyway.
+    // Nothing is lost: the stored date stays in the past, so a restart before the fifteen
+    // seconds are up moves it again, and once it is shown the publisher forgets it.
 
     var config: PluginConfig? = null
     try {
