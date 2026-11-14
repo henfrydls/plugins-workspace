@@ -39,7 +39,8 @@ class BatchArgs {
 
 @InvokeArg
 class CancelArgs {
-  lateinit var notifications: List<Int>
+  // Absent for "cancel all", which sends no list at all.
+  var notifications: List<Int>? = null
 }
 
 @InvokeArg
@@ -145,6 +146,8 @@ class NotificationPlugin(private val activity: Activity): Plugin(activity) {
     val notification = invoke.parseArgs(Notification::class.java)
     notification.sourceJson = invoke.getRawArgs()
     val id = manager.schedule(notification)
+    // Stored only if it was armed: a one-off in the past is refused, and kept in the store
+    // it would come back after every restart (see keepsInStore).
     notificationStorage.appendNotifications(listOf(notification))
 
     invoke.resolveObject(id)
@@ -164,10 +167,18 @@ class NotificationPlugin(private val activity: Activity): Plugin(activity) {
     invoke.resolveObject(ids)
   }
 
+  // `cancelAll` reaches this with no list: the arguments are JSON null from Rust and an
+  // empty object from JavaScript. Both used to fail on the lateinit list, so nothing was
+  // cancelled, and since `show` writes the store that would now outlive every restart.
   @Command
   fun cancel(invoke: Invoke) {
-    val args = invoke.parseArgs(CancelArgs::class.java)
-    manager.cancel(args.notifications)
+    val args: CancelArgs? = invoke.parseArgs(CancelArgs::class.java)
+    val ids = args?.notifications
+    if (ids == null) {
+      manager.cancelAll()
+    } else {
+      manager.cancel(ids)
+    }
     invoke.resolve()
   }
 

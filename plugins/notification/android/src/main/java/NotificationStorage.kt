@@ -12,6 +12,7 @@ import com.fasterxml.jackson.annotation.PropertyAccessor
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.lang.Exception
+import java.util.Date
 
 // Key for private preferences
 private const val NOTIFICATION_STORE_ID = "NOTIFICATION_STORE"
@@ -20,25 +21,24 @@ private const val ACTION_TYPES_ID = "ACTION_TYPE_STORE"
 
 class NotificationStorage(private val context: Context, private val jsonMapper: ObjectMapper) {
   /**
-   * Keep each scheduled notification as the JSON it arrived in, under its id.
+   * Keep each notification just scheduled as the JSON it arrived in, under its id, when it
+   * belongs in the store (see keepsInStore), and take its id out when it does not.
    *
    * It used to write `sourceJson.toString()` with nothing ever assigning `sourceJson`, so
-   * what it would have kept was the string "null". A notification without its source is
-   * skipped rather than stored as that.
-   *
-   * One without a schedule takes its id out instead: scheduling it has just cancelled the
-   * alarm that id had, and an entry left behind would be put back on the next restart.
+   * what it would have kept was the string "null". And the id comes out, rather than being
+   * left alone, because scheduling has just cancelled whatever alarm that id had: an entry
+   * left behind would be put back on the next restart.
    */
-  fun appendNotifications(localNotifications: List<Notification>) {
+  fun appendNotifications(localNotifications: List<Notification>, now: Date = Date()) {
     val storage = getStorage(NOTIFICATION_STORE_ID)
     val editor = storage.edit()
     for (request in localNotifications) {
       val key: String = request.id.toString()
       val source = request.sourceJson
-      if (request.schedule == null) {
-        editor.remove(key)
-      } else if (source != null) {
+      if (source != null && keepsInStore(request, now)) {
         editor.putString(key, source)
+      } else {
+        editor.remove(key)
       }
     }
     editor.apply()
@@ -92,6 +92,10 @@ class NotificationStorage(private val context: Context, private val jsonMapper: 
     val editor = getStorage(NOTIFICATION_STORE_ID).edit()
     editor.remove(id)
     editor.apply()
+  }
+
+  fun deleteAllNotifications() {
+    getStorage(NOTIFICATION_STORE_ID).edit().clear().apply()
   }
 
   private fun getStorage(key: String): SharedPreferences {
@@ -150,9 +154,8 @@ class NotificationStorage(private val context: Context, private val jsonMapper: 
       .setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY)
 
     /**
-     * A stored notification, read back with its source kept, so that storing it again, as
-     * the restore receiver does, writes the same JSON instead of nothing. Null for a stored
-     * JSON null.
+     * A stored notification, read back with the JSON it was stored as kept in `sourceJson`,
+     * which is what a tap on it hands the app. Null for a stored JSON null.
      */
     fun decode(jsonMapper: ObjectMapper, json: String): Notification? {
       val notification = jsonMapper.readValue(json, Notification::class.java) ?: return null

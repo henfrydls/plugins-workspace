@@ -4,6 +4,7 @@
 
 package app.tauri.notification
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlarmManager
@@ -14,6 +15,7 @@ import android.content.BroadcastReceiver
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.AudioAttributes
 import android.net.Uri
@@ -114,10 +116,18 @@ class TauriNotificationManager(
     }
   }
 
-  private fun trigger(notificationManager: NotificationManagerCompat, notification: Notification): Int {
-    dismissVisibleNotification(notification.id)
-    cancelTimerForNotification(notification.id)
-    buildNotification(notificationManager, notification)
+  private fun trigger(
+    notificationManager: NotificationManagerCompat,
+    notification: Notification,
+    restoring: Boolean = false
+  ): Int {
+    for (step in armSteps(restoring)) {
+      when (step) {
+        ArmStep.DismissVisible -> dismissVisibleNotification(notification.id)
+        ArmStep.CancelTimer -> cancelTimerForNotification(notification.id)
+        ArmStep.Build -> buildNotification(notificationManager, notification)
+      }
+    }
 
     return notification.id
   }
@@ -125,6 +135,21 @@ class TauriNotificationManager(
   fun schedule(notification: Notification): Int {
     val notificationManager = NotificationManagerCompat.from(context)
     return trigger(notificationManager, notification)
+  }
+
+  /**
+   * Put stored notifications back on the alarm queue after a restart or an update, leaving
+   * the tray alone (see armSteps), each one on its own (see restoreEach).
+   */
+  fun restore(notifications: List<Notification>) {
+    val notificationManager = NotificationManagerCompat.from(context)
+    restoreEach(
+      notifications,
+      { trigger(notificationManager, it, restoring = true) },
+      { notification, ex ->
+        Logger.error(Logger.tags("Notification"), "Notification ${notification.id} could not be restored", ex)
+      }
+    )
   }
 
   fun schedule(notifications: List<Notification>): List<Int> {
@@ -328,7 +353,7 @@ class TauriNotificationManager(
 
     when (schedule) {
       is NotificationSchedule.At -> {
-        if (schedule.date.time < Date().time) {
+        if (!isArmable(schedule, Date())) {
           Logger.error(Logger.tags("Notification"), "Scheduled time must be *after* current time", null)
           return
         }
@@ -336,7 +361,7 @@ class TauriNotificationManager(
           val interval: Long = schedule.date.time - Date().time
           alarmManager.setRepeating(AlarmManager.RTC, schedule.date.time, interval, pendingIntent)
         } else {
-          setAlarm(alarmManager, schedule.date.time, schedule.allowWhileIdle(), pendingIntent)
+          setAlarm(context, alarmManager, schedule.date.time, schedule.allowWhileIdle(), pendingIntent)
         }
       }
       is NotificationSchedule.Interval -> {
@@ -348,7 +373,7 @@ class TauriNotificationManager(
         )
         pendingIntent =
           PendingIntent.getBroadcast(context, request.id, notificationIntent, flags)
-        setAlarm(alarmManager, trigger, schedule.allowWhileIdle(), pendingIntent)
+        setAlarm(context, alarmManager, trigger, schedule.allowWhileIdle(), pendingIntent)
         val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
         Logger.debug(
           Logger.tags("Notification"),
@@ -370,6 +395,17 @@ class TauriNotificationManager(
       cancelTimerForNotification(id)
       storage.deleteNotification(id.toString())
     }
+  }
+
+  /**
+   * Cancel everything the store knows about, and empty it. Since `show` writes the store,
+   * an entry left there comes back on every restart, so "cancel all" has to reach it. An
+   * alarm armed by a build that did not write the store is not listed anywhere and is
+   * beyond its reach, as it always was.
+   */
+  fun cancelAll() {
+    cancel(storage.getSavedNotificationIds().mapNotNull { it.toIntOrNull() })
+    storage.deleteAllNotifications()
   }
 
   private fun cancelTimerForNotification(notificationId: Int) {
@@ -470,11 +506,6 @@ class TimedNotificationPublisher : BroadcastReceiver() {
     val storage = NotificationStorage(context, NotificationStorage.receiverJsonMapper())
 
     val savedNotification = storage.getSavedNotification(id.toString())
-    if (savedNotification != null) {
-      NotificationPlugin.triggerNotification(savedNotification)
-    }
-
-    notificationManager.notify(id, notification)
     // What the schedule asked for, carried on the intent beside the cron string, which is
     // how the receiver already learns everything else it knows. The intent is cloned on
     // each re-arming, so the answer travels with the alarm for as long as the alarm exists.
@@ -483,12 +514,17 @@ class TimedNotificationPublisher : BroadcastReceiver() {
     // `show` writes the storage: an alarm armed by a build from before that change has an
     // intent with the flag and no stored notification at all.
     val allowWhileIdle = intent.getBooleanExtra(ALLOW_WHILE_IDLE_KEY, false)
-    // A repeating notification is re-armed and stays stored, which is what lets the restore
-    // receiver put it back after a restart or an update. Only a one-off is forgotten here,
-    // once it has been shown.
-    if (!rescheduleNotificationIfNeeded(context, intent, id, allowWhileIdle)) {
-      storage.deleteNotification(id.toString())
-    }
+    // Shown first, the app told after, re-armed whatever happened: see deliver.
+    deliver(
+      show = { notificationManager.notify(id, notification) },
+      tellApp = { savedNotification?.let { NotificationPlugin.triggerNotification(it) } },
+      rearm = { rescheduleNotificationIfNeeded(context, intent, id, allowWhileIdle) },
+      forget = { storage.deleteNotification(id.toString()) },
+      removable = savedNotification?.schedule?.isRemovable() ?: true,
+      failed = { what, ex ->
+        Logger.error(Logger.tags("Notification"), "Notification $id: could not $what", ex)
+      }
+    )
   }
 
   @Suppress("DEPRECATION")
@@ -514,7 +550,7 @@ class TimedNotificationPublisher : BroadcastReceiver() {
         flags = flags or PendingIntent.FLAG_MUTABLE
       }
       val pendingIntent = PendingIntent.getBroadcast(context, id, clone, flags)
-      setAlarm(alarmManager, trigger, allowWhileIdle, pendingIntent)
+      setAlarm(context, alarmManager, trigger, allowWhileIdle, pendingIntent)
       val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
       Logger.debug(
         Logger.tags("Notification"),
@@ -541,9 +577,14 @@ class TimedNotificationPublisher : BroadcastReceiver() {
  * removed by AlarmManagerService on install, without the app being run or told. Either
  * way, without this a repeating notification stays gone until somebody opens the app.
  *
- * Re-arming one that is still on the queue does not double it. `schedule` cancels the
+ * Re-arming one that is still on the queue does not double it. `restore` cancels the
  * timer for that id and arms the new one under the same id with FLAG_CANCEL_CURRENT, so
- * an update that kept the alarm, or a second boot broadcast, ends with one alarm.
+ * an update that kept the alarm, or a second boot broadcast, ends with one alarm. It
+ * leaves the tray alone: a notification still unread there stays.
+ *
+ * Whether the alarm is exact is decided by setAlarm, from the installed manifest as well as
+ * from `canScheduleExactAlarms()`, which may still answer for the old version on
+ * MY_PACKAGE_REPLACED (see armsExact).
  *
  * A repeating schedule is armed for its next match from now, so nothing fires at once.
  * Only a one-off whose time passed while the phone was off is shown, fifteen seconds
@@ -572,6 +613,10 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
         val at: Date = schedule.date
         if (at.before(Date())) {
           // modify the scheduled date in order to show notifications that would have been delivered while device was off.
+          //
+          // Known and left alone: a *repeating* At takes its repeat gap from the time left
+          // until its date (triggerScheduledNotification), so one restored here repeats
+          // every fifteen seconds. Its real gap is not stored anywhere to put it back.
           val newDateTime = Date().time + 15 * 1000
           schedule.date = Date(newDateTime)
         }
@@ -590,7 +635,7 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
       ex.printStackTrace()
     }
     val notificationManager = TauriNotificationManager(storage, null, context, config)
-    notificationManager.schedule(notifications)
+    notificationManager.restore(notifications)
   }
 }
 
@@ -606,16 +651,22 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
  *
  * `allowWhileIdle` is what the caller asked for, and it only ever relaxes Doze for this
  * one alarm. Exactness is not asked for: it is whatever the device will give, so an app
- * without SCHEDULE_EXACT_ALARM still gets its notification, just moved.
+ * without SCHEDULE_EXACT_ALARM still gets its notification, just moved. See armsExact for
+ * why the manifest is read as well as the grant.
  */
-@SuppressLint("ObsoleteSdkInt", "MissingPermission")
+// NewApi: canScheduleExactAlarms is only called from S on; armsExact checks the version
+// before calling it, which lint cannot see through the lambda.
+@SuppressLint("ObsoleteSdkInt", "MissingPermission", "NewApi")
 internal fun setAlarm(
+  context: Context,
   alarmManager: AlarmManager,
   trigger: Long,
   allowWhileIdle: Boolean,
   pendingIntent: PendingIntent
 ) {
-  val exact = SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()
+  val exact = armsExact(SDK_INT, declaresExactAlarms(context)) {
+    alarmManager.canScheduleExactAlarms()
+  }
   val whileIdle = SDK_INT >= Build.VERSION_CODES.M && allowWhileIdle
   when {
     exact && whileIdle ->
@@ -623,5 +674,33 @@ internal fun setAlarm(
     exact -> alarmManager.setExact(AlarmManager.RTC, trigger, pendingIntent)
     whileIdle -> alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
     else -> alarmManager[AlarmManager.RTC, trigger] = pendingIntent
+  }
+}
+
+/**
+ * Whether the installed package asks for exact alarms in its manifest. Read from the
+ * package, which on MY_PACKAGE_REPLACED is already the new version. If it cannot be read,
+ * the answer is no, and the alarm is inexact rather than one that may be removed.
+ */
+@SuppressLint("InlinedApi")
+internal fun declaresExactAlarms(context: Context): Boolean {
+  return try {
+    val pm = context.packageManager
+    val info = if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      pm.getPackageInfo(
+        context.packageName,
+        PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong())
+      )
+    } else {
+      @Suppress("DEPRECATION")
+      pm.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+    }
+    val requested = info.requestedPermissions ?: return false
+    requested.any {
+      it == Manifest.permission.SCHEDULE_EXACT_ALARM || it == Manifest.permission.USE_EXACT_ALARM
+    }
+  } catch (ex: Exception) {
+    Logger.error(Logger.tags("Notification"), "Could not read the app's own permissions", ex)
+    false
   }
 }
