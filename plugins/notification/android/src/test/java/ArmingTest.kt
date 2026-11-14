@@ -158,4 +158,39 @@ class ArmingTest {
   fun alwaysExactBeforeAndroid12() {
     assertTrue(armsExact(sdk = 30, declaresExactAlarms = false) { false })
   }
+
+  // The log line that says which input decided a restored alarm's exactness.
+
+  @Test
+  fun findsTheExactAlarmPermissionAmongTheOthers() {
+    assertEquals(
+      listOf("android.permission.SCHEDULE_EXACT_ALARM"),
+      exactAlarmPermissionsIn(
+        arrayOf("android.permission.INTERNET", "android.permission.SCHEDULE_EXACT_ALARM")
+      )
+    )
+  }
+
+  @Test
+  fun aManifestReadAsNullDeclaresNothing() {
+    assertEquals(listOf<String>(), exactAlarmPermissionsIn(null))
+  }
+
+  @Test
+  fun theLogLineSaysEachInputApart() {
+    val line = exactAlarmDecisionLine(
+      caller = "restore",
+      sdk = 34,
+      requested = null,
+      canScheduleExact = true,
+      exact = false,
+      whileIdle = true
+    )
+
+    assertTrue(line, line.contains("caller=restore"))
+    assertTrue(line, line.contains("requestedPermissions=[null]"))
+    assertTrue(line, line.contains("declaresExactAlarms=false"))
+    assertTrue(line, line.contains("canScheduleExactAlarms=true"))
+    assertTrue(line, line.contains("exact=false"))
+  }
 }

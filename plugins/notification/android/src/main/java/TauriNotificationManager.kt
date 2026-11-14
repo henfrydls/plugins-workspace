@@ -4,7 +4,6 @@
 
 package app.tauri.notification
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlarmManager
@@ -125,7 +124,11 @@ class TauriNotificationManager(
       when (step) {
         ArmStep.DismissVisible -> dismissVisibleNotification(notification.id)
         ArmStep.CancelTimer -> cancelTimerForNotification(notification.id)
-        ArmStep.Build -> buildNotification(notificationManager, notification)
+        ArmStep.Build -> buildNotification(
+          notificationManager,
+          notification,
+          if (restoring) "restore" else "show"
+        )
       }
     }
 
@@ -173,6 +176,7 @@ class TauriNotificationManager(
   private fun buildNotification(
     notificationManager: NotificationManagerCompat,
     notification: Notification,
+    caller: String,
   ) {
     val channelId = notification.channelId ?: DEFAULT_NOTIFICATION_CHANNEL_ID
     val mBuilder = NotificationCompat.Builder(
@@ -237,7 +241,7 @@ class TauriNotificationManager(
     // notificationId is a unique int for each notification that you must define
     val buildNotification = mBuilder.build()
     if (notification.schedule != null) {
-      triggerScheduledNotification(buildNotification, notification)
+      triggerScheduledNotification(buildNotification, notification, caller)
     } else {
       notificationManager.notify(notification.id, buildNotification)
       try {
@@ -335,7 +339,11 @@ class TauriNotificationManager(
    */
   // TODO support different AlarmManager.RTC modes depending on priority
   @SuppressLint("SimpleDateFormat")
-  private fun triggerScheduledNotification(notification: android.app.Notification, request: Notification) {
+  private fun triggerScheduledNotification(
+    notification: android.app.Notification,
+    request: Notification,
+    caller: String
+  ) {
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     val schedule = request.schedule
     val notificationIntent = Intent(
@@ -361,7 +369,7 @@ class TauriNotificationManager(
           val interval: Long = schedule.date.time - Date().time
           alarmManager.setRepeating(AlarmManager.RTC, schedule.date.time, interval, pendingIntent)
         } else {
-          setAlarm(context, alarmManager, schedule.date.time, schedule.allowWhileIdle(), pendingIntent)
+          setAlarm(context, alarmManager, schedule.date.time, schedule.allowWhileIdle(), pendingIntent, caller)
         }
       }
       is NotificationSchedule.Interval -> {
@@ -373,7 +381,7 @@ class TauriNotificationManager(
         )
         pendingIntent =
           PendingIntent.getBroadcast(context, request.id, notificationIntent, flags)
-        setAlarm(context, alarmManager, trigger, schedule.allowWhileIdle(), pendingIntent)
+        setAlarm(context, alarmManager, trigger, schedule.allowWhileIdle(), pendingIntent, caller)
         val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
         Logger.debug(
           Logger.tags("Notification"),
@@ -550,7 +558,7 @@ class TimedNotificationPublisher : BroadcastReceiver() {
         flags = flags or PendingIntent.FLAG_MUTABLE
       }
       val pendingIntent = PendingIntent.getBroadcast(context, id, clone, flags)
-      setAlarm(context, alarmManager, trigger, allowWhileIdle, pendingIntent)
+      setAlarm(context, alarmManager, trigger, allowWhileIdle, pendingIntent, "publisher")
       val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
       Logger.debug(
         Logger.tags("Notification"),
@@ -662,12 +670,23 @@ internal fun setAlarm(
   alarmManager: AlarmManager,
   trigger: Long,
   allowWhileIdle: Boolean,
-  pendingIntent: PendingIntent
+  pendingIntent: PendingIntent,
+  caller: String
 ) {
-  val exact = armsExact(SDK_INT, declaresExactAlarms(context)) {
-    alarmManager.canScheduleExactAlarms()
-  }
+  val requested = requestedPermissions(context)
+  val alarmPermissions = exactAlarmPermissionsIn(requested)
+  // Asked even when the manifest does not ask, so that the log line below has both
+  // answers: a restored alarm came out inexact with the permission granted (measured on an
+  // emulator, 2026-11-14), and which of the two said no is what the line is for.
+  val canScheduleExact =
+    if (SDK_INT >= Build.VERSION_CODES.S) alarmManager.canScheduleExactAlarms() else null
+  val exact = armsExact(SDK_INT, alarmPermissions.isNotEmpty()) { canScheduleExact == true }
   val whileIdle = SDK_INT >= Build.VERSION_CODES.M && allowWhileIdle
+  // Debug builds only (Logger is gated on BuildConfig.DEBUG). One line per alarm armed.
+  Logger.debug(
+    Logger.tags("Notification"),
+    exactAlarmDecisionLine(caller, SDK_INT, requested, canScheduleExact, exact, whileIdle)
+  )
   when {
     exact && whileIdle ->
       alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pendingIntent)
@@ -678,12 +697,11 @@ internal fun setAlarm(
 }
 
 /**
- * Whether the installed package asks for exact alarms in its manifest. Read from the
- * package, which on MY_PACKAGE_REPLACED is already the new version. If it cannot be read,
- * the answer is no, and the alarm is inexact rather than one that may be removed.
+ * The permissions the installed package requests in its manifest, read from the package,
+ * which on MY_PACKAGE_REPLACED is already the new version. Null if they cannot be read, and
+ * then the alarm is inexact rather than one that may be removed (see armsExact).
  */
-@SuppressLint("InlinedApi")
-internal fun declaresExactAlarms(context: Context): Boolean {
+internal fun requestedPermissions(context: Context): Array<String>? {
   return try {
     val pm = context.packageManager
     val info = if (SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -695,12 +713,9 @@ internal fun declaresExactAlarms(context: Context): Boolean {
       @Suppress("DEPRECATION")
       pm.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
     }
-    val requested = info.requestedPermissions ?: return false
-    requested.any {
-      it == Manifest.permission.SCHEDULE_EXACT_ALARM || it == Manifest.permission.USE_EXACT_ALARM
-    }
+    info.requestedPermissions
   } catch (ex: Exception) {
     Logger.error(Logger.tags("Notification"), "Could not read the app's own permissions", ex)
-    false
+    null
   }
 }

@@ -138,3 +138,35 @@ internal fun forgetsAfterShowing(rearmed: Boolean, removable: Boolean): Boolean 
  */
 internal fun armsExact(sdk: Int, declaresExactAlarms: Boolean, canScheduleExact: () -> Boolean): Boolean =
   sdk < Build.VERSION_CODES.S || (declaresExactAlarms && canScheduleExact())
+
+private const val SCHEDULE_EXACT_ALARM = "android.permission.SCHEDULE_EXACT_ALARM"
+private const val USE_EXACT_ALARM = "android.permission.USE_EXACT_ALARM"
+
+/** The exact-alarm permissions among those a manifest requests. */
+internal fun exactAlarmPermissionsIn(requested: Array<String>?): List<String> =
+  requested?.filter { it == SCHEDULE_EXACT_ALARM || it == USE_EXACT_ALARM } ?: listOf()
+
+/**
+ * One line saying how setAlarm decided, for a debug build's logcat. Every input separately,
+ * because a restored alarm came out inexact while the permission was granted, and the
+ * question is which input said no: the manifest as read (null, empty, or which alarm
+ * permissions), or canScheduleExactAlarms().
+ */
+internal fun exactAlarmDecisionLine(
+  caller: String,
+  sdk: Int,
+  requested: Array<String>?,
+  canScheduleExact: Boolean?,
+  exact: Boolean,
+  whileIdle: Boolean
+): String {
+  val manifest = when {
+    requested == null -> "null"
+    requested.isEmpty() -> "empty"
+    else -> "${requested.size} requested, alarm=${exactAlarmPermissionsIn(requested)}"
+  }
+  return "exact-alarm decision: caller=$caller sdk=$sdk requestedPermissions=[$manifest]" +
+    " declaresExactAlarms=${exactAlarmPermissionsIn(requested).isNotEmpty()}" +
+    " canScheduleExactAlarms=${canScheduleExact ?: "not asked"}" +
+    " exact=$exact whileIdle=$whileIdle"
+}
