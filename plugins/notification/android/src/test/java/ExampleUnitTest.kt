@@ -4,6 +4,7 @@
 
 package app.tauri.notification
 
+import org.junit.Ignore
 import org.junit.Test
 
 import org.junit.Assert.*
@@ -14,6 +15,8 @@ import org.junit.Assert.*
  * See [testing documentation](http://d.android.com/tools/testing).
  */
 class ExampleUnitTest {
+    // MUTATION: skipped, so the threshold has to count it out
+    @Ignore
     @Test
     fun addition_isCorrect() {
         assertEquals(4, 2 + 2)

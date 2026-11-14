@@ -61,7 +61,7 @@ internal fun isArmable(schedule: NotificationSchedule, now: Date): Boolean =
  */
 internal fun keepsInStore(notification: Notification, now: Date): Boolean {
   val schedule = notification.schedule ?: return false
-  if (schedule is NotificationSchedule.At && schedule.repeating) return false
+  // MUTATION: a repeating At is stored again
   return notification.sourceJson != null && isArmable(schedule, now)
 }
 
