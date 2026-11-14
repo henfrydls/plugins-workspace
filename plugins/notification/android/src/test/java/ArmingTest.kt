@@ -135,6 +135,16 @@ class ArmingTest {
     assertTrue(keepsInStore(interval(), now))
   }
 
+  // A repeating At restored after its date would fire every minute for good: its gap is the
+  // time left until a date the receiver has just moved fifteen seconds ahead.
+  @Test
+  fun aRepeatingAtIsNotStored() {
+    val repeating = at(Date(now.time + 60_000)).apply {
+      (schedule as NotificationSchedule.At).repeating = true
+    }
+    assertFalse(keepsInStore(repeating, now))
+  }
+
   @Test
   fun nothingWithoutASourceOrASchedule() {
     assertFalse(keepsInStore(interval().apply { sourceJson = null }, now))
@@ -145,18 +155,18 @@ class ArmingTest {
 
   @Test
   fun notExactWhenTheManifestNoLongerAsksEvenIfTheGrantLooksAlive() {
-    assertFalse(armsExact(sdk = 34, declaresExactAlarms = false) { true })
+    assertFalse(armsExact(sdk = 34, declaresExactAlarms = false, canScheduleExact = true))
   }
 
   @Test
   fun exactWhenTheManifestAsksAndAndroidGrants() {
-    assertTrue(armsExact(sdk = 34, declaresExactAlarms = true) { true })
-    assertFalse(armsExact(sdk = 34, declaresExactAlarms = true) { false })
+    assertTrue(armsExact(sdk = 34, declaresExactAlarms = true, canScheduleExact = true))
+    assertFalse(armsExact(sdk = 34, declaresExactAlarms = true, canScheduleExact = false))
   }
 
   @Test
   fun alwaysExactBeforeAndroid12() {
-    assertTrue(armsExact(sdk = 30, declaresExactAlarms = false) { false })
+    assertTrue(armsExact(sdk = 30, declaresExactAlarms = false, canScheduleExact = false))
   }
 
   // The log line that says which input decided a restored alarm's exactness.

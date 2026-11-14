@@ -594,9 +594,11 @@ class TimedNotificationPublisher : BroadcastReceiver() {
  * from `canScheduleExactAlarms()`, which may still answer for the old version on
  * MY_PACKAGE_REPLACED (see armsExact).
  *
- * A repeating schedule is armed for its next match from now, so nothing fires at once.
- * Only a one-off whose time passed while the phone was off is shown, fifteen seconds
- * later, which is what the original restore was written to do.
+ * An `Interval` or an `Every` is armed for its next match from now, so it does not fire at
+ * once. A one-off `At` whose time passed while the phone was off is shown fifteen seconds
+ * later, which is what the original restore was written to do, so that one does arrive
+ * straight after the restart. A repeating `At` is not stored (see keepsInStore), so it is
+ * not restored at all.
  */
 class LocalNotificationRestoreReceiver : BroadcastReceiver() {
   @SuppressLint("ObsoleteSdkInt")
@@ -622,9 +624,10 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
         if (at.before(Date())) {
           // modify the scheduled date in order to show notifications that would have been delivered while device was off.
           //
-          // Known and left alone: a *repeating* At takes its repeat gap from the time left
-          // until its date (triggerScheduledNotification), so one restored here repeats
-          // every fifteen seconds. Its real gap is not stored anywhere to put it back.
+          // Only a one-off reaches here from a store this version wrote. A *repeating* At
+          // takes its repeat gap from the time left until its date
+          // (triggerScheduledNotification), so one moved here would repeat every minute,
+          // AlarmManager's floor, for good; keepsInStore keeps it out of the store for that.
           val newDateTime = Date().time + 15 * 1000
           schedule.date = Date(newDateTime)
         }
@@ -662,9 +665,7 @@ class LocalNotificationRestoreReceiver : BroadcastReceiver() {
  * without SCHEDULE_EXACT_ALARM still gets its notification, just moved. See armsExact for
  * why the manifest is read as well as the grant.
  */
-// NewApi: canScheduleExactAlarms is only called from S on; armsExact checks the version
-// before calling it, which lint cannot see through the lambda.
-@SuppressLint("ObsoleteSdkInt", "MissingPermission", "NewApi")
+@SuppressLint("ObsoleteSdkInt", "MissingPermission")
 internal fun setAlarm(
   context: Context,
   alarmManager: AlarmManager,
@@ -680,7 +681,7 @@ internal fun setAlarm(
   // emulator, 2026-11-14), and which of the two said no is what the line is for.
   val canScheduleExact =
     if (SDK_INT >= Build.VERSION_CODES.S) alarmManager.canScheduleExactAlarms() else null
-  val exact = armsExact(SDK_INT, alarmPermissions.isNotEmpty()) { canScheduleExact == true }
+  val exact = armsExact(SDK_INT, alarmPermissions.isNotEmpty(), canScheduleExact == true)
   val whileIdle = SDK_INT >= Build.VERSION_CODES.M && allowWhileIdle
   // Debug builds only (Logger is gated on BuildConfig.DEBUG). One line per alarm armed.
   Logger.debug(

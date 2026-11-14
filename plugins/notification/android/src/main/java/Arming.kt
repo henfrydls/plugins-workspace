@@ -51,9 +51,17 @@ internal fun isArmable(schedule: NotificationSchedule, now: Date): Boolean =
  * receiver puts back after a restart. Only one that was armed and whose source is known. A
  * refused one kept there would come back fifteen seconds after every restart, as a
  * notification nobody scheduled.
+ *
+ * Never a repeating `At`. Its repeat gap is not stored: arming takes it from the time left
+ * until its date. Restored after that date has passed, the date is moved fifteen seconds
+ * ahead, so the gap becomes fifteen seconds, which AlarmManager stretches to its one-minute
+ * floor: a notification every minute, for good, from one restart. Left out of the store, a
+ * repeating `At` is gone after a restart until the app schedules it again, which is what it
+ * did before the store was written at all.
  */
 internal fun keepsInStore(notification: Notification, now: Date): Boolean {
   val schedule = notification.schedule ?: return false
+  if (schedule is NotificationSchedule.At && schedule.repeating) return false
   return notification.sourceJson != null && isArmable(schedule, now)
 }
 
@@ -120,8 +128,9 @@ internal fun deliver(
 /**
  * Whether the store forgets a notification once it has been shown: only a one-off. A
  * repeating one stays stored even when this receiver does not re-arm it itself, as with
- * `Every` and a repeating `At`, whose alarms AlarmManager repeats on its own; forgetting
- * them would leave nothing for the restore receiver after the next restart.
+ * `Every`, whose alarm AlarmManager repeats on its own; forgetting it would leave nothing
+ * for the restore receiver after the next restart. A repeating `At` is never stored in the
+ * first place (see keepsInStore).
  */
 internal fun forgetsAfterShowing(rearmed: Boolean, removable: Boolean): Boolean =
   !rearmed && removable
@@ -136,8 +145,8 @@ internal fun forgetsAfterShowing(rearmed: Boolean, removable: Boolean): Boolean 
  * armed in that gap is one AlarmManagerService removes a moment later, without telling
  * anybody. The installed package's requested permissions are already the new ones.
  */
-internal fun armsExact(sdk: Int, declaresExactAlarms: Boolean, canScheduleExact: () -> Boolean): Boolean =
-  sdk < Build.VERSION_CODES.S || (declaresExactAlarms && canScheduleExact())
+internal fun armsExact(sdk: Int, declaresExactAlarms: Boolean, canScheduleExact: Boolean): Boolean =
+  sdk < Build.VERSION_CODES.S || (declaresExactAlarms && canScheduleExact)
 
 private const val SCHEDULE_EXACT_ALARM = "android.permission.SCHEDULE_EXACT_ALARM"
 private const val USE_EXACT_ALARM = "android.permission.USE_EXACT_ALARM"
