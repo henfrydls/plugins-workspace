@@ -273,14 +273,17 @@ class NotificationPlugin(private val activity: Activity): Plugin(activity) {
     }
   }
 
+  // Every path replies. From Android 13 a request made while the permission was already
+  // granted used to reply nothing at all, so the call waited for ever and the app's switch
+  // stayed busy. See permissionRequest.
   @Command
   override fun requestPermissions(invoke: Invoke) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-      permissionState(invoke)
-    } else {
-      if (getPermissionState(LOCAL_NOTIFICATIONS) !== PermissionState.GRANTED) {
+    val granted = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+      getPermissionState(LOCAL_NOTIFICATIONS) == PermissionState.GRANTED
+    when (permissionRequest(Build.VERSION.SDK_INT, granted)) {
+      PermissionRequest.AnswerNow -> permissionState(invoke)
+      PermissionRequest.AskThePerson ->
         requestPermissionForAlias(LOCAL_NOTIFICATIONS, invoke, "permissionsCallback")
-      }
     }
   }
 

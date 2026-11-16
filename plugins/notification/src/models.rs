@@ -113,6 +113,11 @@ pub enum Schedule {
         interval: ScheduleInterval,
         #[serde(default)]
         allow_while_idle: bool,
+        /// Milliseconds since the epoch before which the first firing may not happen.
+        /// Android only: read by the Kotlin side for the first firing, and kept out of the
+        /// JSON when absent so that what reaches it is what it was before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_before: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     Every {

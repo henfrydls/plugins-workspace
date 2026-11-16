@@ -179,3 +179,46 @@ internal fun exactAlarmDecisionLine(
     " canScheduleExactAlarms=${canScheduleExact ?: "not asked"}" +
     " exact=$exact whileIdle=$whileIdle"
 }
+
+/**
+ * When an interval fires first: the next match from now, or, when the app asked for a later
+ * start, the first match at or after that moment.
+ *
+ * What the app uses it for is a daily reminder that should not ring on a day already
+ * logged: it asks for the start of tomorrow, and the reminder comes back tomorrow at its
+ * time and every day after, by itself, without the app being opened. Cancelling the
+ * reminder instead would have silenced it until the next time somebody opened the app.
+ *
+ * "At or after": nextTrigger counts a match at the exact moment it is given as already
+ * past, so a reminder at 00:00 started from midnight would skip a whole day. One second
+ * before is handed to it instead, which is the resolution the match works in (it zeroes
+ * the milliseconds and keeps the seconds).
+ *
+ * A start already past is ignored, so a reminder restored after a restart days later fires
+ * at its next match, as one without a start would.
+ */
+internal fun firstTrigger(match: DateMatch, notBefore: Long?, now: Date): Long {
+  val from = if (notBefore != null && notBefore - 1_000 > now.time) Date(notBefore - 1_000) else now
+  return match.nextTrigger(from)
+}
+
+/** What a permission request does with the person. */
+internal enum class PermissionRequest {
+  /** Reply with the state as it is, without showing anything. */
+  AnswerNow,
+  /** Show Android's question and reply with what the person chose. */
+  AskThePerson,
+}
+
+/**
+ * Whether a permission request shows Android's question.
+ *
+ * Below Android 13 there is no question to show: notifications are allowed unless they were
+ * turned off in the settings, so the reply is the state. From 13 up, the question only when
+ * the permission is not already granted, and otherwise the reply is "granted". That branch
+ * was missing: a request from an app that already had the permission was never replied to,
+ * the app's call waited for ever, and its switch stayed busy.
+ */
+internal fun permissionRequest(sdk: Int, granted: Boolean): PermissionRequest =
+  if (sdk < Build.VERSION_CODES.TIRAMISU || granted) PermissionRequest.AnswerNow
+  else PermissionRequest.AskThePerson

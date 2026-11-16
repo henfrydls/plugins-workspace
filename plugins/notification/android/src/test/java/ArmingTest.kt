@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Calendar
 import java.util.Date
 
 /**
@@ -202,5 +203,62 @@ class ArmingTest {
     assertTrue(line, line.contains("declaresExactAlarms=false"))
     assertTrue(line, line.contains("canScheduleExactAlarms=true"))
     assertTrue(line, line.contains("exact=false"))
+  }
+
+  // 7. A day already logged: the first firing waits for tomorrow, and only the first.
+
+  private fun nov(day: Int, hour: Int, minute: Int): Long = Calendar.getInstance().apply {
+    set(2026, Calendar.NOVEMBER, day, hour, minute, 0)
+    set(Calendar.MILLISECOND, 0)
+  }.timeInMillis
+
+  private fun daily(hour: Int, minute: Int) = DateMatch().apply {
+    this.hour = hour; this.minute = minute; second = 0
+  }
+
+  @Test
+  fun withoutAStartItIsTheNextMatchFromNow() {
+    assertEquals(nov(16, 21, 0), firstTrigger(daily(21, 0), null, Date(nov(16, 19, 30))))
+  }
+
+  @Test
+  fun aStartTomorrowSkipsTodaysTime() {
+    assertEquals(
+      nov(17, 21, 0),
+      firstTrigger(daily(21, 0), nov(17, 0, 0), Date(nov(16, 19, 30)))
+    )
+  }
+
+  @Test
+  fun aMidnightReminderStartedAtMidnightIsNotADayLate() {
+    assertEquals(
+      nov(17, 0, 0),
+      firstTrigger(daily(0, 0), nov(17, 0, 0), Date(nov(16, 19, 30)))
+    )
+  }
+
+  @Test
+  fun aStartAlreadyPastIsTheNextMatchFromNow() {
+    assertEquals(
+      nov(16, 21, 0),
+      firstTrigger(daily(21, 0), nov(15, 0, 0), Date(nov(16, 19, 30)))
+    )
+  }
+
+  // 8. A permission request is always replied to.
+
+  @Test
+  fun belowAndroid13TheRequestRepliesWithTheState() {
+    assertEquals(PermissionRequest.AnswerNow, permissionRequest(sdk = 32, granted = false))
+  }
+
+  @Test
+  fun fromAndroid13AnAlreadyGrantedRequestRepliesAtOnce() {
+    assertEquals(PermissionRequest.AnswerNow, permissionRequest(sdk = 33, granted = true))
+  }
+
+  @Test
+  fun fromAndroid13ANotGrantedRequestAsksThePerson() {
+    assertEquals(PermissionRequest.AskThePerson, permissionRequest(sdk = 33, granted = false))
   }
 }

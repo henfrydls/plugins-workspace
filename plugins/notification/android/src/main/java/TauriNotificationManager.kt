@@ -93,8 +93,18 @@ class TauriNotificationManager(
     // Create the NotificationChannel, but only on API 26+ because
     // the NotificationChannel class is new and not in the support library
     if (SDK_INT >= Build.VERSION_CODES.O) {
-      val name: CharSequence = "Default"
-      val description = "Default"
+      // What the phone's settings call it. "Default" said nothing about what it is, and the
+      // one notification Daylo sends is its daily reminder.
+      //
+      // The id stays "default", on purpose. A channel's name and description are the two
+      // things Android lets an app change after the channel exists: creating it again with
+      // the same id renames it on phones that already have it, the next time the app opens.
+      // Its importance and sound are not, and neither changes here. A new id would have
+      // renamed it too, but it would be a new channel: Android shows it with its own
+      // defaults, and anybody who had turned the reminder's sound down or off in the
+      // settings would get it back at full volume.
+      val name: CharSequence = "Daily reminder"
+      val description = "A reminder to log your day, at the time set in Daylo"
       val importance = NotificationManager.IMPORTANCE_DEFAULT
       val channel = NotificationChannel(DEFAULT_NOTIFICATION_CHANNEL_ID, name, importance)
       channel.description = description
@@ -373,7 +383,7 @@ class TauriNotificationManager(
         }
       }
       is NotificationSchedule.Interval -> {
-        val trigger = schedule.interval.nextTrigger(Date())
+        val trigger = firstTrigger(schedule.interval, schedule.notBefore, Date())
         notificationIntent.putExtra(TimedNotificationPublisher.CRON_KEY, schedule.interval.toMatchString())
         notificationIntent.putExtra(
           TimedNotificationPublisher.ALLOW_WHILE_IDLE_KEY,

@@ -76,6 +76,10 @@ sealed class NotificationSchedule {
   class Interval: NotificationSchedule() {
     lateinit var interval: DateMatch
     var allowWhileIdle: Boolean = false
+    // Milliseconds since the epoch before which the first firing may not happen, or null
+    // for "the next match from now". Only the first firing reads it: the receiver re-arms
+    // from the cron on the intent, which is later than this by then. See firstTrigger.
+    var notBefore: Long? = null
   }
   @JsonDeserialize
   class Every: NotificationSchedule() {

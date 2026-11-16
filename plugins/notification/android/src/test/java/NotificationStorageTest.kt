@@ -93,4 +93,24 @@ class NotificationStorageTest {
       (readBack(sources[1])!!.schedule as NotificationSchedule.Interval).allowWhileIdle()
     )
   }
+
+  // The start the app asks for on a day already logged has to survive the store, or a
+  // restart that same evening would ring the reminder the app had moved to tomorrow.
+  @Test
+  fun keepsTheStartTheAppAskedFor() {
+    val later = dailyAtNine.replace(
+      "\"allowWhileIdle\":true}",
+      "\"allowWhileIdle\":true,\"notBefore\":1800000000000}"
+    )
+    val schedule = readBack(later)!!.schedule as NotificationSchedule.Interval
+
+    assertEquals(1_800_000_000_000L, schedule.notBefore)
+  }
+
+  @Test
+  fun aReminderWithoutAStartHasNone() {
+    val schedule = readBack(dailyAtNine)!!.schedule as NotificationSchedule.Interval
+
+    assertNull(schedule.notBefore)
+  }
 }
